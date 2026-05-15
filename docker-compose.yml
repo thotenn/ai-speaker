@@ -1,7 +1,10 @@
 services:
   piper-sandbox:
-    build: .
-    container_name: piper-sandbox
+    build:
+      context: .
+      args:
+        PIPER_INSTALL_TARGET: ${PIPER_INSTALL_TARGET:-.[tts]}
+    container_name: ${PIPER_CONTAINER_NAME:-piper-sandbox}
     restart: unless-stopped
     environment:
       PIPER_HOST: 0.0.0.0
@@ -14,7 +17,7 @@ services:
       PIPER_DEFAULT_MODEL: ${PIPER_DEFAULT_MODEL:-es_MX-ald-medium}
       PIPER_MODEL_NAMES: ${PIPER_MODEL_NAMES:-["es_MX-claude-high","es_MX-ald-medium","es_ES-carlfm-x_low"]}
     ports:
-      - "8000:8000"
+      - "${PIPER_HOST_PORT:-8000}:${PIPER_PORT:-8000}"
     volumes:
       - piper-models:/app/models
     healthcheck:

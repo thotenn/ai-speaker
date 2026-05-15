@@ -58,6 +58,9 @@ Available variables:
 ```env
 PIPER_HOST=127.0.0.1
 PIPER_PORT=8000
+PIPER_HOST_PORT=8000
+PIPER_CONTAINER_NAME=piper-sandbox
+PIPER_INSTALL_TARGET=.[tts]
 PIPER_SERVICE_MODE=both
 PIPER_ENGINE_URL=
 PIPER_CORS_ORIGIN=*
@@ -67,6 +70,29 @@ PIPER_DEFAULT_MODEL=es_MX-ald-medium
 PIPER_MODEL_NAMES=["es_MX-claude-high","es_MX-ald-medium","es_ES-carlfm-x_low"]
 # PIPER_BIN=/usr/local/bin/piper
 ```
+
+`PIPER_PORT` is the port used by the Python process inside the container or when running locally. `PIPER_HOST_PORT` is the port exposed on the host machine by Docker Compose.
+
+Example:
+
+```env
+PIPER_PORT=8000
+PIPER_HOST_PORT=8001
+```
+
+With Docker Compose this means:
+
+```text
+host:8001 -> container:8000
+```
+
+You would access the service from your browser or API client at:
+
+```text
+http://127.0.0.1:8001
+```
+
+If you are not using Docker, `PIPER_HOST_PORT` is not used and usually only `PIPER_PORT` matters.
 
 `PIPER_SERVICE_MODE` controls which part of the app is exposed:
 
@@ -313,16 +339,21 @@ http://127.0.0.1:8000
 Run engine only in Docker:
 
 ```bash
-PIPER_SERVICE_MODE=engine docker compose up --build
+PIPER_SERVICE_MODE=engine PIPER_INSTALL_TARGET='.[tts]' docker compose up --build
 ```
 
 Run GUI only in Docker and connect it to a remote engine:
 
 ```bash
-PIPER_SERVICE_MODE=gui PIPER_ENGINE_URL=https://tts-engine.example.com docker compose up --build
+PIPER_SERVICE_MODE=gui PIPER_INSTALL_TARGET=. PIPER_ENGINE_URL=https://tts-engine.example.com docker compose up --build
 ```
 
-The image installs the `.[tts]` extra, which attempts to install `piper-tts`. Models are stored in the `piper-models` volume.
+`PIPER_INSTALL_TARGET` controls what is installed at image build time:
+
+- `.[tts]`: installs the app plus `piper-tts`; use this for `both` or `engine` mode.
+- `.`: installs only the app; use this for `gui` mode when synthesis happens on a remote engine.
+
+Models are stored in the `piper-models` volume when the engine is enabled.
 
 ## Coolify With GitHub Apps
 

@@ -18,7 +18,8 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY piper_sandbox ./piper_sandbox
 
-RUN pip install --upgrade pip && pip install '.[tts]'
+ARG PIPER_INSTALL_TARGET='.[tts]'
+RUN pip install --upgrade pip && pip install "$PIPER_INSTALL_TARGET"
 
 EXPOSE 8000
 
