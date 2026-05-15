@@ -6,7 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIPER_HOST=0.0.0.0 \
     PIPER_PORT=8000 \
     PIPER_ENABLE_GUI=true \
-    PIPER_MODELS_DIR=/app/models/piper
+    PIPER_MODELS_DIR=/app/models/piper \
+    PIPER_HF_BASE=https://huggingface.co/rhasspy/piper-voices/resolve/main \
+    PIPER_DEFAULT_MODEL=es_MX-ald-medium \
+    PIPER_MODEL_NAMES='["es_MX-claude-high","es_MX-ald-medium","es_ES-carlfm-x_low"]'
 
 WORKDIR /app
 

@@ -1,102 +1,136 @@
 # Piper Sandbox
 
-Pequena libreria, API HTTP y GUI web opcional para probar voces TTS con Piper. El modelo por defecto es `es_MX-ald-medium`, una voz en espanhol latinoamericano disponible en `rhasspy/piper-voices`.
+Small Python library, HTTP API, and optional web GUI for testing TTS voices with Piper. The default model is `es_MX-ald-medium`, a Latin American Spanish voice available in `rhasspy/piper-voices`.
 
-La primera generacion descarga automaticamente el modelo en `PIPER_MODELS_DIR`.
+The first generation automatically downloads the selected model into `PIPER_MODELS_DIR`.
 
-## Requisitos
+## Requirements
 
-- Python 3.11 o 3.12 recomendado.
-- Binario `piper` disponible en `PATH`, o variable `PIPER_BIN=/ruta/a/piper`.
-- Navegador web si quieres usar la GUI.
+- Python 3.11 or 3.12 recommended.
+- `piper` binary available in `PATH`, or `PIPER_BIN=/path/to/piper`.
+- Web browser if you want to use the GUI.
 
-Python 3.13 puede funcionar para la API, pero `piper-tts` puede fallar por dependencias binarias como `onnxruntime`.
+Python 3.13 may work for the API, but `piper-tts` can fail because of binary dependencies such as `onnxruntime`.
 
-## Instalacion Local
+## Local Installation
 
-Crear entorno virtual:
+Create a virtual environment:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 ```
 
-Instalar la libreria sin Piper:
+Install the library without Piper:
 
 ```bash
 pip install -e .
 ```
 
-Instalar la libreria intentando incluir el ejecutable `piper` desde PyPI:
+Install the library and try to include the `piper` executable from PyPI:
 
 ```bash
 pip install -e '.[tts]'
 ```
 
-Verificar que `piper` existe:
+Verify that `piper` exists:
 
 ```bash
 piper --help
 ```
 
-Si no se instala con `pip`, instala el binario oficial de Piper y dejalo en tu `PATH`. Tambien puedes apuntar directamente al binario:
+If it cannot be installed with `pip`, install the official Piper binary and make sure it is available in your `PATH`. You can also point directly to the binary:
 
 ```bash
-export PIPER_BIN=/ruta/a/piper
+export PIPER_BIN=/path/to/piper
 ```
 
-## Configuracion
+## Configuration
 
-Copia el ejemplo de entorno:
+Copy the environment example:
 
 ```bash
 cp .env.example .env
 ```
 
-Variables disponibles:
+Available variables:
 
 ```env
 PIPER_HOST=127.0.0.1
 PIPER_PORT=8000
 PIPER_ENABLE_GUI=true
 PIPER_MODELS_DIR=models/piper
+PIPER_HF_BASE=https://huggingface.co/rhasspy/piper-voices/resolve/main
+PIPER_DEFAULT_MODEL=es_MX-ald-medium
+PIPER_MODEL_NAMES=["es_MX-claude-high","es_MX-ald-medium","es_ES-carlfm-x_low"]
 # PIPER_BIN=/usr/local/bin/piper
 ```
 
-Para desactivar la GUI y dejar solo la API:
+To disable the GUI and keep only the API:
 
 ```env
 PIPER_ENABLE_GUI=false
 ```
 
-Tambien puedes usar flags:
+You can also use flags:
 
 ```bash
 python -m piper_sandbox.api --no-gui
 python -m piper_sandbox.api --gui
 ```
 
-## Ejecutar
+`PIPER_MODEL_NAMES` can be a JSON array or a comma-separated list:
+
+```env
+PIPER_MODEL_NAMES=["es_MX-claude-high","es_MX-ald-medium"]
+```
+
+```env
+PIPER_MODEL_NAMES=es_MX-claude-high,es_MX-ald-medium
+```
+
+Each name must follow Piper's model naming format:
+
+```text
+language_COUNTRY-voice-quality
+```
+
+Example with `es_MX-claude-high`:
+
+```text
+language = es
+country = MX
+voice = claude
+quality = high
+```
+
+That pattern automatically generates the URL:
+
+```text
+{PIPER_HF_BASE}/es/es_MX/claude/high/es_MX-claude-high.onnx
+```
+
+## Run
 
 ```bash
 python -m piper_sandbox.api
 ```
 
-Con la configuracion por defecto abre:
+With the default configuration, open:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-La GUI web permite escribir texto, elegir modelo y reproducir el audio generado. Presiona `Ctrl+Enter` o el boton `Hablar`.
+The web GUI lets you type text, choose a model, and play the generated audio. Press `Ctrl+Enter` or the `Hablar` button.
 
 ## Endpoints
 
 ### `GET /health`
 
-Health check para servidores y Docker.
+Health check for servers and Docker.
 
-Respuesta:
+Response:
 
 ```json
 {
@@ -107,9 +141,9 @@ Respuesta:
 
 ### `GET /models`
 
-Lista los modelos disponibles en esta app.
+Lists the models available in this app.
 
-Ejemplo:
+Example:
 
 ```bash
 curl http://127.0.0.1:8000/models
@@ -117,9 +151,9 @@ curl http://127.0.0.1:8000/models
 
 ### `POST /speak`
 
-Genera audio WAV. Recibe JSON con `text` y `model`.
+Generates WAV audio. Receives JSON with `text` and `model`.
 
-Ejemplo:
+Example:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/speak \
@@ -128,7 +162,7 @@ curl -X POST http://127.0.0.1:8000/speak \
   --output salida.wav
 ```
 
-Respuesta exitosa:
+Successful response:
 
 ```text
 Content-Type: audio/wav
@@ -136,11 +170,11 @@ Content-Type: audio/wav
 
 ### `GET /`
 
-Muestra la GUI web si `PIPER_ENABLE_GUI=true`.
+Shows the web GUI if `PIPER_ENABLE_GUI=true`.
 
-Si `PIPER_ENABLE_GUI=false`, responde `404` con `GUI is disabled`.
+If `PIPER_ENABLE_GUI=false`, it returns `404` with `GUI is disabled`.
 
-## Uso Como Libreria
+## Library Usage
 
 ```python
 from piper_sandbox import PiperEngine
@@ -155,7 +189,7 @@ engine.synthesize_to_file(
 
 ## Wyoming Piper
 
-La API incluida genera WAV usando el binario `piper`. Tambien hay un wrapper pequeno para arrancar `wyoming-piper` si lo instalas aparte.
+The included API generates WAV files using the `piper` binary. There is also a small wrapper for starting `wyoming-piper` if you install it separately.
 
 ```python
 from piper_sandbox import WyomingPiperService
@@ -164,7 +198,7 @@ service = WyomingPiperService(voice="es_MX-ald-medium")
 service.start()
 ```
 
-Equivalente aproximado por terminal:
+Approximate terminal equivalent:
 
 ```bash
 wyoming-piper \
@@ -176,52 +210,54 @@ wyoming-piper \
 
 ## Docker
 
-Construir y ejecutar con Docker Compose:
+Build and run with Docker Compose:
 
 ```bash
 docker compose up --build
 ```
 
-Abrir:
+Open:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-Desactivar GUI en Docker:
+Disable the GUI in Docker:
 
 ```bash
 PIPER_ENABLE_GUI=false docker compose up --build
 ```
 
-La imagen instala el extra `.[tts]`, que intenta instalar `piper-tts`. Los modelos se guardan en el volumen `piper-models`.
+The image installs the `.[tts]` extra, which attempts to install `piper-tts`. Models are stored in the `piper-models` volume.
 
-## Coolify Con GitHub Apps
+## Coolify With GitHub Apps
 
-Pasos recomendados:
+Recommended steps:
 
-1. Sube este proyecto a un repositorio GitHub.
-2. En Coolify, crea un nuevo recurso desde GitHub Apps.
-3. Selecciona el repositorio.
-4. Elige despliegue con `Docker Compose`.
-5. Usa el archivo `docker-compose.yml` incluido.
-6. Configura variables de entorno si quieres cambiar comportamiento.
+1. Push this project to a GitHub repository.
+2. In Coolify, create a new resource from GitHub Apps.
+3. Select the repository.
+4. Choose deployment with `Docker Compose`.
+5. Use the included `docker-compose.yml` file.
+6. Configure environment variables if you want to change behavior.
 
-Variables utiles para Coolify:
+Useful variables for Coolify:
 
 ```env
 PIPER_ENABLE_GUI=true
+PIPER_DEFAULT_MODEL=es_MX-ald-medium
+PIPER_MODEL_NAMES=["es_MX-claude-high","es_MX-ald-medium","es_ES-carlfm-x_low"]
 ```
 
-Coolify normalmente provee el dominio y proxy externo. El contenedor escucha en `0.0.0.0:8000`.
+Coolify usually provides the public domain and external proxy. The container listens on `0.0.0.0:8000`.
 
-Si lo quieres solo como API publica, usa:
+If you want it as a public API only, use:
 
 ```env
 PIPER_ENABLE_GUI=false
 ```
 
-## Modelos Incluidos
+## Included Models
 
-- `es_MX-ald-medium`: espanhol Mexico, recomendado para prueba latinoamericana.
-- `es_ES-carlfm-x_low`: espanhol Espanha, alternativa liviana.
+- `es_MX-ald-medium`: Spanish Mexico, recommended for Latin American testing.
+- `es_ES-carlfm-x_low`: Spanish Spain, lightweight alternative.

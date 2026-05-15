@@ -8,6 +8,9 @@ services:
       PIPER_PORT: 8000
       PIPER_ENABLE_GUI: ${PIPER_ENABLE_GUI:-true}
       PIPER_MODELS_DIR: /app/models/piper
+      PIPER_HF_BASE: ${PIPER_HF_BASE:-https://huggingface.co/rhasspy/piper-voices/resolve/main}
+      PIPER_DEFAULT_MODEL: ${PIPER_DEFAULT_MODEL:-es_MX-ald-medium}
+      PIPER_MODEL_NAMES: ${PIPER_MODEL_NAMES:-["es_MX-claude-high","es_MX-ald-medium","es_ES-carlfm-x_low"]}
     ports:
       - "8000:8000"
     volumes:
