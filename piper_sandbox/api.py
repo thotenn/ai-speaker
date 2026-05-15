@@ -5,6 +5,7 @@ import json
 import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 from .config import env_bool, env_int, load_env
 from .engine import PiperEngine, PiperError
@@ -55,8 +56,11 @@ INDEX_HTML = """
     const status = document.querySelector('#status');
     const audio = document.querySelector('#audio');
 
+    const engineUrl = '__ENGINE_URL__'.replace(/\\/$/, '');
+    const apiUrl = (path) => `${engineUrl}${path}`;
+
     async function loadModels() {
-      const response = await fetch('/models');
+      const response = await fetch(apiUrl('/models'));
       const data = await response.json();
       for (const item of data.models) {
         const option = document.createElement('option');
@@ -73,7 +77,7 @@ INDEX_HTML = """
       speak.disabled = true;
       status.textContent = 'Generando audio...';
       try {
-        const response = await fetch('/speak', {
+        const response = await fetch(apiUrl('/speak'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -107,21 +111,37 @@ INDEX_HTML = """
 
 class PiperRequestHandler(BaseHTTPRequestHandler):
     engine = PiperEngine()
-    enable_gui = True
+    service_mode = "both"
+    engine_url = ""
+    cors_origin = "*"
 
     def do_GET(self) -> None:
-        if self.path == "/":
-            if not self.enable_gui:
+        path = urlparse(self.path).path
+
+        if path == "/":
+            if not self.gui_enabled:
                 self._send_error(HTTPStatus.NOT_FOUND, "GUI is disabled")
                 return
-            self._send_text(INDEX_HTML, "text/html; charset=utf-8")
+            html = INDEX_HTML.replace("__ENGINE_URL__", self.engine_url)
+            self._send_text(html, "text/html; charset=utf-8")
             return
 
-        if self.path == "/health":
-            self._send_json({"status": "ok", "gui": self.enable_gui})
+        if path == "/health":
+            self._send_json(
+                {
+                    "status": "ok",
+                    "mode": self.service_mode,
+                    "engine": self.engine_enabled,
+                    "gui": self.gui_enabled,
+                    "engine_url": self.engine_url,
+                }
+            )
             return
 
-        if self.path == "/models":
+        if path == "/models":
+            if not self.engine_enabled:
+                self._send_error(HTTPStatus.NOT_FOUND, "Engine is disabled")
+                return
             body = {
                 "default": DEFAULT_MODEL,
                 "models": [spec.__dict__ for spec in MODELS.values()],
@@ -132,8 +152,14 @@ class PiperRequestHandler(BaseHTTPRequestHandler):
         self._send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_POST(self) -> None:
-        if self.path != "/speak":
+        path = urlparse(self.path).path
+
+        if path != "/speak":
             self._send_error(HTTPStatus.NOT_FOUND, "Not found")
+            return
+
+        if not self.engine_enabled:
+            self._send_error(HTTPStatus.NOT_FOUND, "Engine is disabled")
             return
 
         try:
@@ -152,8 +178,24 @@ class PiperRequestHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "audio/wav")
         self.send_header("Content-Length", str(len(wav)))
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(wav)
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self._send_cors_headers()
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    @property
+    def engine_enabled(self) -> bool:
+        return self.service_mode in {"both", "engine"}
+
+    @property
+    def gui_enabled(self) -> bool:
+        return self.service_mode in {"both", "gui"}
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"{self.address_string()} - {fmt % args}")
@@ -163,6 +205,7 @@ class PiperRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(data)
 
@@ -171,11 +214,18 @@ class PiperRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(data)
 
     def _send_error(self, status: HTTPStatus, message: str) -> None:
         self._send_text(message, "text/plain; charset=utf-8", status=status)
+
+    def _send_cors_headers(self) -> None:
+        if not self.cors_origin:
+            return
+        self.send_header("Access-Control-Allow-Origin", self.cors_origin)
+        self.send_header("Vary", "Origin")
 
 
 def main() -> None:
@@ -183,15 +233,28 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Piper sandbox web GUI and API.")
     parser.add_argument("--host", default=os.environ.get("PIPER_HOST", "127.0.0.1"))
     parser.add_argument("--port", default=env_int("PIPER_PORT", 8000), type=int)
+    parser.add_argument("--mode", choices=("both", "engine", "gui"), default=os.environ.get("PIPER_SERVICE_MODE", "both"))
+    parser.add_argument("--engine-url", default=os.environ.get("PIPER_ENGINE_URL", ""))
+    parser.add_argument("--cors-origin", default=os.environ.get("PIPER_CORS_ORIGIN", "*"))
     parser.add_argument("--gui", dest="enable_gui", action="store_true")
     parser.add_argument("--no-gui", dest="enable_gui", action="store_false")
-    parser.set_defaults(enable_gui=env_bool("PIPER_ENABLE_GUI", True))
+    parser.set_defaults(enable_gui=None)
     args = parser.parse_args()
 
-    PiperRequestHandler.enable_gui = args.enable_gui
+    service_mode = args.mode
+    if args.enable_gui is not None:
+        service_mode = "both" if args.enable_gui else "engine"
+    elif "PIPER_ENABLE_GUI" in os.environ:
+        service_mode = "both" if env_bool("PIPER_ENABLE_GUI", True) else "engine"
+
+    PiperRequestHandler.service_mode = service_mode
+    PiperRequestHandler.engine_url = args.engine_url.rstrip("/")
+    PiperRequestHandler.cors_origin = args.cors_origin
     server = ThreadingHTTPServer((args.host, args.port), PiperRequestHandler)
     print(f"Piper Sandbox listening on http://{args.host}:{args.port}")
-    print(f"GUI enabled: {args.enable_gui}")
+    print(f"Mode: {service_mode}")
+    if service_mode == "gui":
+        print(f"Engine URL: {PiperRequestHandler.engine_url or 'same origin'}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

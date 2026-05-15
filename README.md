@@ -58,7 +58,9 @@ Available variables:
 ```env
 PIPER_HOST=127.0.0.1
 PIPER_PORT=8000
-PIPER_ENABLE_GUI=true
+PIPER_SERVICE_MODE=both
+PIPER_ENGINE_URL=
+PIPER_CORS_ORIGIN=*
 PIPER_MODELS_DIR=models/piper
 PIPER_HF_BASE=https://huggingface.co/rhasspy/piper-voices/resolve/main
 PIPER_DEFAULT_MODEL=es_MX-ald-medium
@@ -66,17 +68,47 @@ PIPER_MODEL_NAMES=["es_MX-claude-high","es_MX-ald-medium","es_ES-carlfm-x_low"]
 # PIPER_BIN=/usr/local/bin/piper
 ```
 
-To disable the GUI and keep only the API:
+`PIPER_SERVICE_MODE` controls which part of the app is exposed:
 
 ```env
-PIPER_ENABLE_GUI=false
+PIPER_SERVICE_MODE=both
+```
+
+Available modes:
+
+- `both`: serves the engine endpoints and the web GUI from the same process.
+- `engine`: serves only `/health`, `/models`, and `/speak`.
+- `gui`: serves only the web GUI. The GUI calls the remote engine defined by `PIPER_ENGINE_URL`.
+
+To run only the engine API:
+
+```env
+PIPER_SERVICE_MODE=engine
+```
+
+To run only the GUI and point it to a remote engine:
+
+```env
+PIPER_SERVICE_MODE=gui
+PIPER_ENGINE_URL=https://tts-engine.example.com
 ```
 
 You can also use flags:
 
 ```bash
+python -m piper_sandbox.api --mode both
+python -m piper_sandbox.api --mode engine
+python -m piper_sandbox.api --mode gui --engine-url https://tts-engine.example.com
 python -m piper_sandbox.api --no-gui
 python -m piper_sandbox.api --gui
+```
+
+`PIPER_ENABLE_GUI=true|false` is still supported for compatibility, but `PIPER_SERVICE_MODE` is preferred.
+
+`PIPER_CORS_ORIGIN` controls the CORS header returned by the engine. Keep `*` for simple public testing, or restrict it to your GUI origin in production:
+
+```env
+PIPER_CORS_ORIGIN=https://tts-gui.example.com
 ```
 
 `PIPER_MODEL_NAMES` can be a JSON array or a comma-separated list:
@@ -124,6 +156,60 @@ http://127.0.0.1:8000
 
 The web GUI lets you type text, choose a model, and play the generated audio. Press `Ctrl+Enter` or the `Hablar` button.
 
+### Run Everything Together
+
+```env
+PIPER_SERVICE_MODE=both
+```
+
+```bash
+python -m piper_sandbox.api
+```
+
+This serves:
+
+- GUI: `GET /`
+- Engine: `GET /models`, `POST /speak`
+
+### Run Engine Only
+
+Use this on the server that has Piper installed and enough CPU/RAM for TTS generation.
+
+```env
+PIPER_SERVICE_MODE=engine
+PIPER_HOST=0.0.0.0
+PIPER_PORT=8000
+PIPER_CORS_ORIGIN=*
+```
+
+```bash
+python -m piper_sandbox.api
+```
+
+This exposes only:
+
+- `GET /health`
+- `GET /models`
+- `POST /speak`
+
+### Run GUI Only
+
+Use this on any PC or small server. It does not need Piper installed because it delegates synthesis to the remote engine.
+
+```env
+PIPER_SERVICE_MODE=gui
+PIPER_ENGINE_URL=https://tts-engine.example.com
+```
+
+```bash
+python -m piper_sandbox.api
+```
+
+This exposes only:
+
+- `GET /`
+- `GET /health`
+
 ## Endpoints
 
 ### `GET /health`
@@ -135,13 +221,15 @@ Response:
 ```json
 {
   "status": "ok",
+  "mode": "both",
+  "engine": true,
   "gui": true
 }
 ```
 
 ### `GET /models`
 
-Lists the models available in this app.
+Lists the models available in this app. Available in `both` and `engine` modes.
 
 Example:
 
@@ -151,7 +239,7 @@ curl http://127.0.0.1:8000/models
 
 ### `POST /speak`
 
-Generates WAV audio. Receives JSON with `text` and `model`.
+Generates WAV audio. Receives JSON with `text` and `model`. Available in `both` and `engine` modes.
 
 Example:
 
@@ -170,9 +258,9 @@ Content-Type: audio/wav
 
 ### `GET /`
 
-Shows the web GUI if `PIPER_ENABLE_GUI=true`.
+Shows the web GUI in `both` and `gui` modes.
 
-If `PIPER_ENABLE_GUI=false`, it returns `404` with `GUI is disabled`.
+If the GUI is disabled, it returns `404` with `GUI is disabled`.
 
 ## Library Usage
 
@@ -222,10 +310,16 @@ Open:
 http://127.0.0.1:8000
 ```
 
-Disable the GUI in Docker:
+Run engine only in Docker:
 
 ```bash
-PIPER_ENABLE_GUI=false docker compose up --build
+PIPER_SERVICE_MODE=engine docker compose up --build
+```
+
+Run GUI only in Docker and connect it to a remote engine:
+
+```bash
+PIPER_SERVICE_MODE=gui PIPER_ENGINE_URL=https://tts-engine.example.com docker compose up --build
 ```
 
 The image installs the `.[tts]` extra, which attempts to install `piper-tts`. Models are stored in the `piper-models` volume.
@@ -244,7 +338,7 @@ Recommended steps:
 Useful variables for Coolify:
 
 ```env
-PIPER_ENABLE_GUI=true
+PIPER_SERVICE_MODE=both
 PIPER_DEFAULT_MODEL=es_MX-ald-medium
 PIPER_MODEL_NAMES=["es_MX-claude-high","es_MX-ald-medium","es_ES-carlfm-x_low"]
 ```
@@ -254,7 +348,14 @@ Coolify usually provides the public domain and external proxy. The container lis
 If you want it as a public API only, use:
 
 ```env
-PIPER_ENABLE_GUI=false
+PIPER_SERVICE_MODE=engine
+```
+
+If you want a GUI-only deployment that points to another engine server, use:
+
+```env
+PIPER_SERVICE_MODE=gui
+PIPER_ENGINE_URL=https://tts-engine.example.com
 ```
 
 ## Included Models

@@ -6,7 +6,9 @@ services:
     environment:
       PIPER_HOST: 0.0.0.0
       PIPER_PORT: 8000
-      PIPER_ENABLE_GUI: ${PIPER_ENABLE_GUI:-true}
+      PIPER_SERVICE_MODE: ${PIPER_SERVICE_MODE:-both}
+      PIPER_ENGINE_URL: ${PIPER_ENGINE_URL:-}
+      PIPER_CORS_ORIGIN: ${PIPER_CORS_ORIGIN:-*}
       PIPER_MODELS_DIR: /app/models/piper
       PIPER_HF_BASE: ${PIPER_HF_BASE:-https://huggingface.co/rhasspy/piper-voices/resolve/main}
       PIPER_DEFAULT_MODEL: ${PIPER_DEFAULT_MODEL:-es_MX-ald-medium}
