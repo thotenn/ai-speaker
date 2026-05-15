@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+from .chunks import ChunkConfig, split_text
 from .config import env_bool, env_int, load_env
 from .engine import PiperEngine, PiperError
 from .models import DEFAULT_MODEL, MODELS
 
 
 MAX_REQUEST_BODY_BYTES = 1 * 1024 * 1024
+DEFAULT_CHUNK_CONFIG = ChunkConfig(target_chars=350, min_chars=120, max_chars=700)
 
 
 INDEX_HTML = """
@@ -117,6 +121,8 @@ class PiperRequestHandler(BaseHTTPRequestHandler):
     service_mode = "both"
     engine_url = ""
     cors_origin = "*"
+    chunks_enabled = False
+    chunk_config = DEFAULT_CHUNK_CONFIG
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
@@ -138,6 +144,7 @@ class PiperRequestHandler(BaseHTTPRequestHandler):
                     "engine": self.engine_enabled,
                     "gui": self.gui_enabled,
                     "engine_url": self.engine_url,
+                    "chunks_enabled": self.chunks_enabled and self.engine_enabled,
                 }
             )
             return
@@ -156,7 +163,12 @@ class PiperRequestHandler(BaseHTTPRequestHandler):
         self._send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_POST(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/speak/chunks":
+            self._handle_speak_chunks(parsed)
+            return
 
         if path != "/speak":
             self._send_error(HTTPStatus.NOT_FOUND, "Not found")
@@ -194,6 +206,88 @@ class PiperRequestHandler(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.end_headers()
         self.wfile.write(wav)
+
+    def _handle_speak_chunks(self, parsed) -> None:
+        if not self.engine_enabled:
+            self._send_error(HTTPStatus.NOT_FOUND, "Engine is disabled")
+            return
+        if not self.chunks_enabled:
+            self._send_error(HTTPStatus.NOT_IMPLEMENTED, "Chunked TTS is disabled")
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_error(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
+            return
+
+        if length > MAX_REQUEST_BODY_BYTES:
+            self._send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Payload too large")
+            return
+
+        try:
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            text = str(payload.get("text", ""))
+            model = str(payload.get("model", DEFAULT_MODEL))
+            if model not in MODELS:
+                raise KeyError(f"Unknown model {model!r}")
+            chunks = split_text(text, self.chunk_config)
+        except json.JSONDecodeError as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, f"Invalid JSON: {exc}")
+            return
+        except (KeyError, ValueError) as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+
+        query = parse_qs(parsed.query)
+        include_text = query.get("include_text", ["0"])[0].lower() in {"1", "true", "yes"}
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self._send_cors_headers()
+        self.end_headers()
+
+        self._write_ndjson({
+            "type": "meta",
+            "model": model,
+            "chunks": len(chunks),
+            "target_chars": self.chunk_config.target_chars,
+            "min_chars": self.chunk_config.min_chars,
+            "max_chars": self.chunk_config.max_chars,
+        })
+
+        for chunk in chunks:
+            try:
+                t0 = time.perf_counter()
+                wav = self.engine.synthesize_bytes(chunk.text, model=model)
+                synthesis_seconds = time.perf_counter() - t0
+                duration_seconds = self.engine.audio_duration_seconds(wav)
+            except PiperError as exc:
+                self._write_ndjson({"type": "error", "index": chunk.index, "message": str(exc)})
+                return
+
+            event = {
+                "type": "chunk",
+                "index": chunk.index,
+                "chars": chunk.chars,
+                "split_reason": chunk.split_reason,
+                "synthesis_seconds": round(synthesis_seconds, 3),
+                "duration_seconds": round(duration_seconds, 3),
+                "rtf": round(synthesis_seconds / duration_seconds, 3) if duration_seconds > 0 else None,
+                "audio_base64": base64.b64encode(wav).decode("ascii"),
+            }
+            if include_text:
+                event["text"] = chunk.text
+            self._write_ndjson(event)
+
+        self._write_ndjson({"type": "done"})
+
+    def _write_ndjson(self, obj: object) -> None:
+        line = json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\n"
+        self.wfile.write(line)
+        self.wfile.flush()
 
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -263,6 +357,12 @@ def main() -> None:
     PiperRequestHandler.service_mode = service_mode
     PiperRequestHandler.engine_url = args.engine_url.rstrip("/")
     PiperRequestHandler.cors_origin = args.cors_origin
+    PiperRequestHandler.chunks_enabled = env_bool("PIPER_CHUNKS_ENABLED", False)
+    PiperRequestHandler.chunk_config = ChunkConfig(
+        target_chars=env_int("PIPER_CHUNK_TARGET_CHARS", DEFAULT_CHUNK_CONFIG.target_chars),
+        min_chars=env_int("PIPER_CHUNK_MIN_CHARS", DEFAULT_CHUNK_CONFIG.min_chars),
+        max_chars=env_int("PIPER_CHUNK_MAX_CHARS", DEFAULT_CHUNK_CONFIG.max_chars),
+    )
     server = ThreadingHTTPServer((args.host, args.port), PiperRequestHandler)
     print(f"Piper Sandbox listening on http://{args.host}:{args.port}")
     print(f"Mode: {service_mode}")

@@ -35,40 +35,40 @@ V1 scope only. Hardware detection, benchmark, adaptive controller, prefetch and 
 
 ## Phase 2 — Endpoint (`piper_sandbox/api.py`)
 
-- [ ] Read env at startup: `PIPER_CHUNKS_ENABLED` (default false), `PIPER_CHUNK_TARGET_CHARS=350`, `PIPER_CHUNK_MIN_CHARS=120`, `PIPER_CHUNK_MAX_CHARS=700`.
-- [ ] Validate `0 < min <= target <= max`; fail at startup otherwise.
-- [ ] Add `wav_duration_seconds(data: bytes)` helper using `wave.open(io.BytesIO(...))`.
-- [ ] Route `POST /speak/chunks` in `do_POST`.
-- [ ] Return 501 with `text/plain` when feature flag is off.
-- [ ] Return 404 when service mode is `gui` (engine disabled).
-- [ ] Validate JSON, non-empty `text`, known `model` before any streaming → 400 on failure.
-- [ ] Call `split_text` before opening the stream so chunk count is known for `meta`.
-- [ ] Send response headers: `200`, `Content-Type: application/x-ndjson; charset=utf-8`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`, CORS, **no** `Content-Length`.
-- [ ] Emit `meta` event first with `model`, `chunks`, `target_chars`, `min_chars`, `max_chars`.
-- [ ] For each chunk: synthesize, measure `synthesis_seconds` and `duration_seconds`, base64-encode WAV, emit `chunk` event with `index`, `chars`, `split_reason`, `synthesis_seconds`, `duration_seconds`, `rtf`, `audio_base64`.
-- [ ] Omit chunk `text` by default; include only when `?include_text=1`.
-- [ ] Flush after every event.
-- [ ] On `PiperError` mid-stream: emit `{"type":"error","index":i,"message":...}` and return.
-- [ ] Emit `done` event last on success.
-- [ ] `/speak` handler untouched (still byte-compatible).
+- [x] Read env at startup: `PIPER_CHUNKS_ENABLED` (default false), `PIPER_CHUNK_TARGET_CHARS=350`, `PIPER_CHUNK_MIN_CHARS=120`, `PIPER_CHUNK_MAX_CHARS=700`.
+- [x] Validate `0 < min <= target <= max`; fail at startup otherwise.
+- [x] Add `wav_duration_seconds(data: bytes)` helper using `wave.open(io.BytesIO(...))`.
+- [x] Route `POST /speak/chunks` in `do_POST`.
+- [x] Return 501 with `text/plain` when feature flag is off.
+- [x] Return 404 when service mode is `gui` (engine disabled).
+- [x] Validate JSON, non-empty `text`, known `model` before any streaming → 400 on failure.
+- [x] Call `split_text` before opening the stream so chunk count is known for `meta`.
+- [x] Send response headers: `200`, `Content-Type: application/x-ndjson; charset=utf-8`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`, CORS, **no** `Content-Length`.
+- [x] Emit `meta` event first with `model`, `chunks`, `target_chars`, `min_chars`, `max_chars`.
+- [x] For each chunk: synthesize, measure `synthesis_seconds` and `duration_seconds`, base64-encode WAV, emit `chunk` event with `index`, `chars`, `split_reason`, `synthesis_seconds`, `duration_seconds`, `rtf`, `audio_base64`.
+- [x] Omit chunk `text` by default; include only when `?include_text=1`.
+- [x] Flush after every event.
+- [x] On `PiperError` mid-stream: emit `{"type":"error","index":i,"message":...}` and return.
+- [x] Emit `done` event last on success.
+- [x] `/speak` handler untouched (still byte-compatible).
 
 ### Health update
 
-- [ ] Add `chunks_enabled` boolean to `/health` JSON response.
+- [x] Add `chunks_enabled` boolean to `/health` JSON response.
 
 ### Endpoint tests (`tests/test_speak_chunks_endpoint.py`)
 
-- [ ] Fixture: monkeypatch `PiperRequestHandler.engine` to a `FakeEngine` returning a canned ~1-second silent WAV.
-- [ ] Fixture: start `ThreadingHTTPServer` on an ephemeral port; teardown shuts it down.
-- [ ] When disabled: `POST /speak/chunks` → 501.
-- [ ] When enabled, valid short text → 200, `application/x-ndjson`, sequence: `meta` (chunks=1), one `chunk`, `done`.
-- [ ] When enabled, long text → multiple `chunk` events with sequential indexes.
-- [ ] `chunk.audio_base64` decodes to bytes starting with `RIFF`.
-- [ ] Empty text → 400 before any NDJSON.
-- [ ] Unknown model → 400 before any NDJSON.
-- [ ] Invalid JSON → 400.
-- [ ] `?include_text=1` adds `text` field; default request omits it.
-- [ ] `/health` exposes `chunks_enabled` matching the env value.
+- [x] Fixture: monkeypatch `PiperRequestHandler.engine` to a `FakeEngine` returning a canned ~1-second silent WAV.
+- [x] Fixture: start `ThreadingHTTPServer` on an ephemeral port; teardown shuts it down.
+- [x] When disabled: `POST /speak/chunks` → 501.
+- [x] When enabled, valid short text → 200, `application/x-ndjson`, sequence: `meta` (chunks=1), one `chunk`, `done`.
+- [x] When enabled, long text → multiple `chunk` events with sequential indexes.
+- [x] `chunk.audio_base64` decodes to bytes starting with `RIFF`.
+- [x] Empty text → 400 before any NDJSON.
+- [x] Unknown model → 400 before any NDJSON.
+- [x] Invalid JSON → 400.
+- [x] `?include_text=1` adds `text` field; default request omits it.
+- [x] `/health` exposes `chunks_enabled` matching the env value.
 
 ## Phase 3 — Reference GUI
 
