@@ -67,9 +67,11 @@ def model_spec_from_name(name: str) -> ModelSpec:
     )
 
 
-MODELS: dict[str, ModelSpec] = {
-    name: model_spec_from_name(name) for name in parse_model_names(os.environ.get("PIPER_MODEL_NAMES"))
-}
+_configured_names = parse_model_names(os.environ.get("PIPER_MODEL_NAMES"))
+if DEFAULT_MODEL not in _configured_names:
+    _configured_names = [DEFAULT_MODEL, *_configured_names]
+
+MODELS: dict[str, ModelSpec] = {name: model_spec_from_name(name) for name in _configured_names}
 
 
 def get_model_spec(name: str) -> ModelSpec:

@@ -2,72 +2,46 @@
 
 ## Summary
 
-Add adaptive text chunking and chunked audio delivery to the Piper engine so long text can start playing quickly while the next chunks are synthesized in the background.
+Add chunked audio delivery to the Piper engine so long text starts playing earlier. The existing `/speak` endpoint returns one complete WAV; this feature adds an additive `/speak/chunks` endpoint that streams audio in pieces while later chunks are still being generated.
 
-The current `/speak` endpoint generates one complete WAV before returning. That works well for short text, but long text creates a poor perceived latency because the user waits for the entire synthesis before hearing anything.
+The whole feature is gated by a single env flag (`PIPER_CHUNKS_ENABLED`). When disabled, behavior is identical to today and `/speak/chunks` returns HTTP `501`.
 
-This feature keeps the existing `/speak` behavior and adds a chunked path for long text.
+## Scope: V1 vs V2
 
-## Goals
+**V1 (this spec).** Sequential streaming. Server splits text, generates chunks one by one, emits each as soon as it is ready. Latency win comes from "chunk 0 reaches the client before chunk N has been synthesized," not from parallelism. Chunk sizes are static, configured by env.
+
+**V2 (future, out of scope here).** Hardware-aware adaptive chunk sizing, per-model benchmark, multi-worker prefetch, binary transport, session-based jobs with cancellation, Web Audio API gapless playback. Captured in `## Future Improvements`. Do not implement in V1.
+
+This split lets us ship a useful feature quickly and prove the endpoint contract before adding adaptive complexity that is hard to test.
+
+## Goals (V1)
 
 - Start audio playback earlier for long text.
-- Split text intelligently using paragraphs, sentence punctuation, clauses, and whitespace.
-- Adapt chunk size to the current machine and selected model.
-- Keep chunks large enough to avoid audible gaps and excessive overhead.
-- Keep chunks small enough so the next chunk is ready before the current one finishes playing.
-- Preserve the perception of one continuous audio response.
-- Expose the feature through engine APIs that can be reused by a larger project.
-- Keep the web GUI as a demonstration client only.
+- Split text intelligently using paragraph, sentence, clause and whitespace boundaries.
+- Keep chunks large enough to avoid audible gaps and excessive overhead, small enough that chunk 0 ships fast.
+- Expose the feature through an engine endpoint that any client can consume (the bundled GUI is a reference client only).
+- Keep `/speak` byte-compatible with today's behavior.
+- Gate the entire feature behind one env flag.
 
-## Non-Goals
+## Non-Goals (V1)
 
-- Do not replace `/speak`; it remains the simple full-WAV endpoint.
-- Do not implement true continuous WAV streaming in the first version.
-- Do not require the GUI for engine functionality.
-- Do not require external services.
-- Do not use AI/LLM-based chunking.
-- Do not optimize for perfect prosody at chunk boundaries in the first version.
+- No replacement of `/speak`.
+- No true continuous WAV streaming (one WAV per chunk is fine).
+- No hardware detection, benchmarking, or adaptive sizing.
+- No prefetching with parallel Piper workers.
+- No AI/LLM-based chunking.
+- No perfect gapless playback at chunk boundaries.
+- No persistence of chunk jobs between requests.
 
-## Service Mode For Development
-
-All implementation and tests for this feature will be developed in `both` mode during the feature phases:
-
-```env
-PIPER_SERVICE_MODE=both
-```
-
-This allows the same process to expose both the engine APIs and the example GUI while tests are being developed.
-
-## Existing Behavior
-
-Current endpoint:
+## Existing Behavior (unchanged)
 
 ```text
 POST /speak
+{"text": "Hello", "model": "es_MX-claude-high"}
+→ 200 audio/wav (full WAV)
 ```
 
-Input:
-
-```json
-{
-  "text": "Hello",
-  "model": "es_MX-claude-high"
-}
-```
-
-Output:
-
-```text
-Content-Type: audio/wav
-```
-
-The response is returned only after Piper finishes generating the whole WAV.
-
-## Proposed Behavior
-
-Add a chunked endpoint while keeping `/speak` unchanged.
-
-Initial proposed endpoint:
+## Proposed Endpoint
 
 ```text
 POST /speak/chunks
@@ -76,305 +50,223 @@ POST /speak/chunks
 Input:
 
 ```json
-{
-  "text": "Long text...",
-  "model": "es_MX-claude-high"
-}
+{"text": "Long text...", "model": "es_MX-claude-high"}
 ```
 
-Output format for the first implementation:
+Response when `PIPER_CHUNKS_ENABLED=true`:
 
 ```text
-Content-Type: application/x-ndjson
+HTTP/1.1 200 OK
+Content-Type: application/x-ndjson; charset=utf-8
+Transfer-Encoding: chunked
+Cache-Control: no-cache
+X-Accel-Buffering: no
 ```
 
-Each line is one JSON event.
-
-Example:
-
-```jsonl
-{"type":"meta","model":"es_MX-claude-high","chunks":4,"mode":"adaptive"}
-{"type":"chunk","index":0,"text":"...","duration_seconds":8.4,"audio_base64":"..."}
-{"type":"chunk","index":1,"text":"...","duration_seconds":9.1,"audio_base64":"..."}
-{"type":"done"}
-```
-
-The NDJSON approach is intentionally simple and testable. A later version may move to a session-based API, binary multipart response, Server-Sent Events, WebSocket, or MediaSource-based playback.
-
-## Chunking Strategy
-
-The splitter receives text plus adaptive sizing constraints:
+Response when `PIPER_CHUNKS_ENABLED=false`:
 
 ```text
-target_chars
-min_chars
-max_chars
+HTTP/1.1 501 Not Implemented
+Content-Type: text/plain
+Chunked TTS is disabled
 ```
 
-The target is not a hard limit. It is the preferred chunk size based on machine capability and model speed.
+## NDJSON Event Stream
 
-The splitter should preserve natural language boundaries whenever possible.
+Each line is one JSON object, terminated by `\n`, flushed immediately after write.
 
-Boundary priority:
+Sequence:
 
 ```text
-paragraph boundary
-sentence boundary: . ? !
-strong separator: ; :
-clause boundary: ,
-whitespace
-hard split
+meta → chunk → chunk → ... → done
 ```
 
-Important rule:
-
-The first paragraph is not automatically the first chunk. If the adaptive target is 1000 characters and the first 3 paragraphs total 917 characters, those 3 paragraphs should become one chunk. If the next paragraph is 200 characters, the remaining 83 characters of target budget are not enough to justify adding it, so that next paragraph starts the next chunk.
-
-The chunker should prefer complete semantic units over filling every character of the target budget.
-
-## Chunk Sizing Rules
-
-The chunker should aim for:
+Or, on mid-stream synthesis failure:
 
 ```text
-min_chars <= chunk length <= max_chars
+meta → chunk → ... → error
 ```
 
-But it may exceed `max_chars` when a single sentence or paragraph is longer than `max_chars`. In that case it should split at the best lower-priority boundary inside that unit.
-
-Recommended initial defaults:
-
-```env
-PIPER_CHUNKS_ENABLED=true
-PIPER_CHUNK_THRESHOLD_CHARS=600
-PIPER_CHUNK_TARGET_CHARS=350
-PIPER_CHUNK_MIN_CHARS=120
-PIPER_CHUNK_MAX_CHARS=700
-PIPER_CHUNK_PREFETCH=1
-PIPER_CHUNK_MAX_WORKERS=1
-```
-
-These defaults should be overridden by hardware detection and benchmark results when adaptive mode is enabled.
-
-## Hardware Detection
-
-At startup, the engine should collect a lightweight hardware profile.
-
-Minimum profile:
+### `meta` (first line)
 
 ```json
 {
-  "cpu_count": 8,
-  "memory_total_mb": 16000,
-  "memory_available_mb": 9000,
-  "platform": "linux"
+  "type": "meta",
+  "model": "es_MX-claude-high",
+  "chunks": 4,
+  "target_chars": 350,
+  "min_chars": 120,
+  "max_chars": 700
 }
 ```
 
-Implementation options:
+`chunks` is the planned chunk count (known up front because V1 splits the whole text before synthesizing).
 
-- Use `os.cpu_count()` for CPU count.
-- Use standard library only at first if possible.
-- Optionally add `psutil` later for better memory detection.
-- If memory cannot be detected, continue with conservative defaults.
-
-The hardware profile should not be the only signal. Real Piper speed depends on the selected model, CPU type, current load, and container limits.
-
-## Startup Benchmark
-
-Hardware detection should be paired with a startup or first-use benchmark.
-
-Benchmark idea:
-
-1. Generate a short fixed phrase with the default model.
-2. Measure synthesis wall time.
-3. Measure generated audio duration.
-4. Compute real-time factor.
-
-Real-time factor:
-
-```text
-rtf = synthesis_seconds / audio_duration_seconds
-```
-
-Interpretation:
-
-```text
-rtf < 0.5  -> faster than realtime, good for larger chunks
-rtf ~= 1.0 -> realtime, use moderate chunks
-rtf > 1.0  -> slower than realtime, use smaller chunks and prefetch carefully
-```
-
-The benchmark result should be cached in memory by model name.
-
-If benchmarking fails, use conservative defaults and keep the service available.
-
-## Adaptive Timing Model
-
-The goal is not only to split by characters. The engine should keep the next chunk ready before the current chunk finishes playing.
-
-For each generated chunk, collect:
-
-```text
-text_chars
-synthesis_seconds
-audio_duration_seconds
-delivery_overhead_seconds
-```
-
-Useful estimates:
-
-```text
-chars_per_audio_second = text_chars / audio_duration_seconds
-chars_per_synthesis_second = text_chars / synthesis_seconds
-```
-
-The next chunk target should consider playback time:
-
-```text
-expected_generation_time(next_chunk) + delivery_overhead < current_audio_duration - safety_margin
-```
-
-Example:
-
-If the current audio is 10 seconds long, the next chunk should be generated and delivered in less than roughly 8 seconds so there is buffer before playback ends.
-
-If generation and delivery would take 25 seconds for a chunk that only plays for 10 seconds, the chunk is too large or the prefetch strategy is insufficient. The adaptive controller should reduce target chunk size and/or increase prefetch if hardware allows it.
-
-## Prefetch Strategy
-
-Initial implementation should use simple sequential generation:
-
-```text
-generate chunk 0
-send chunk 0
-generate chunk 1
-send chunk 1
-...
-```
-
-Then add prefetch:
-
-```text
-generate chunk 0
-send chunk 0
-start generating chunk 1 while client plays chunk 0
-send chunk 1 as soon as ready
-```
-
-The first production-ready version should support:
-
-```env
-PIPER_CHUNK_PREFETCH=1
-PIPER_CHUNK_MAX_WORKERS=1
-```
-
-Higher worker counts should be optional because parallel Piper processes can increase CPU contention and may make latency worse on small machines.
-
-## Client Playback Model
-
-The GUI is only a reference client.
-
-Reference GUI behavior:
-
-1. Request `/speak/chunks`.
-2. Read NDJSON events as they arrive.
-3. Decode each chunk's `audio_base64` into a Blob.
-4. Queue chunks in memory.
-5. Start playing as soon as chunk 0 arrives.
-6. Play the next chunk immediately when the current chunk ends.
-7. Keep status visible: generating, buffering, playing, done.
-
-First version may use a normal `<audio>` element and accept tiny gaps.
-
-Later versions may use Web Audio API for gapless scheduling.
-
-## API Compatibility
-
-The existing `/speak` endpoint remains unchanged.
-
-The new endpoint should be additive.
-
-The engine should be usable without the GUI.
-
-The GUI should be able to call a remote engine through `PIPER_ENGINE_URL`.
-
-## Error Handling
-
-If chunk generation fails after some chunks were already sent, emit an error event:
-
-```json
-{"type":"error","message":"...","index":2}
-```
-
-The GUI should stop playback only if there are no queued chunks left. If there are queued chunks, it can finish playing them and then show the error.
-
-For `/speak/chunks`, invalid input should return HTTP `400` before any stream starts.
-
-## Configuration
-
-Proposed variables:
-
-```env
-PIPER_CHUNKS_ENABLED=true
-PIPER_CHUNK_THRESHOLD_CHARS=600
-PIPER_CHUNK_ADAPTIVE=true
-PIPER_CHUNK_TARGET_CHARS=350
-PIPER_CHUNK_MIN_CHARS=120
-PIPER_CHUNK_MAX_CHARS=700
-PIPER_CHUNK_PREFETCH=1
-PIPER_CHUNK_MAX_WORKERS=1
-PIPER_CHUNK_SAFETY_MARGIN_SECONDS=1.5
-PIPER_CHUNK_BENCHMARK_ON_START=false
-```
-
-Suggested behavior:
-
-- If `PIPER_CHUNKS_ENABLED=false`, `/speak/chunks` returns `404` or `501`.
-- If text length is below `PIPER_CHUNK_THRESHOLD_CHARS`, the GUI may keep using `/speak`.
-- If adaptive mode is disabled, use static chunk sizes from env.
-- If adaptive mode is enabled, use static values as initial bounds.
-
-## Observability
-
-Add metadata to chunk events so clients and tests can inspect behavior:
+### `chunk`
 
 ```json
 {
   "type": "chunk",
   "index": 0,
-  "chars": 320,
-  "duration_seconds": 8.2,
-  "synthesis_seconds": 1.4,
+  "chars": 318,
+  "split_reason": "sentence",
+  "synthesis_seconds": 1.42,
+  "duration_seconds": 8.21,
   "rtf": 0.17,
-  "split_reason": "sentence"
+  "audio_base64": "UklGRgA..."
 }
 ```
 
-The `/health` endpoint may later include chunking capability:
+The original chunk `text` is **not** included by default (the client already sent it, including it doubles payload). Clients that need it for debugging can pass `?include_text=1`.
+
+### `done`
+
+```json
+{"type": "done"}
+```
+
+### `error`
+
+```json
+{"type": "error", "index": 2, "message": "Piper exited with code 1"}
+```
+
+Emitted after `meta` if synthesis fails partway through. The client should finish playing any already-queued chunks and then surface the error.
+
+Pre-stream errors (invalid JSON, empty text, unknown model, feature disabled) return non-200 status codes before any NDJSON is written.
+
+## Chunking Strategy
+
+The splitter is the only non-trivial piece of V1. It is pure (text in, list of chunks out), independent from HTTP and Piper, and unit-testable without any external dependency.
+
+### Inputs
+
+```python
+ChunkConfig(target_chars: int, min_chars: int, max_chars: int)
+```
+
+`target_chars` is the *preferred* chunk size, not a hard limit. `min_chars` and `max_chars` define the operating range.
+
+### Boundary priority
+
+Highest to lowest:
+
+```text
+paragraph (blank line, \n\n or \r\n\r\n)
+sentence terminators: . ? !
+strong separators: ; :
+comma: ,
+whitespace
+hard split
+```
+
+Punctuation stays attached to the *previous* chunk so Piper renders prosody correctly at the end of each chunk.
+
+### Packing rule
+
+Pack semantic units (paragraphs first, then sentences inside an oversized paragraph) into the current chunk while the resulting length stays close to `target_chars`. If adding the next unit would overflow significantly, emit the current chunk and start a new one — do **not** stuff small units into every leftover byte of budget.
+
+Concrete example: if `target_chars=1000`, three paragraphs together total 917, and the fourth paragraph is 200 characters, emit the first three as one chunk (close enough to target) and start the next chunk with paragraph four. Do not include paragraph four just because 83 bytes remain.
+
+### When a single unit exceeds `max_chars`
+
+Recurse into the unit using the next boundary level (sentence → strong separator → comma → whitespace → hard). Hard split is allowed only as last resort (text with no whitespace at all).
+
+### Edge cases
+
+- Empty/whitespace-only text → reject with HTTP `400` before streaming starts.
+- Single very short text → one chunk, `split_reason: "single"`.
+- Text shorter than `min_chars` → one chunk, no split.
+- Trailing whitespace between chunks → strip on the *new* chunk side, leave punctuation/spacing on the previous side.
+- Line endings: normalize `\r\n` → `\n` before splitting.
+
+## Configuration
+
+V1 env variables (added to `.env.example` only when read by code):
+
+```env
+PIPER_CHUNKS_ENABLED=false
+PIPER_CHUNK_TARGET_CHARS=350
+PIPER_CHUNK_MIN_CHARS=120
+PIPER_CHUNK_MAX_CHARS=700
+```
+
+Default `PIPER_CHUNKS_ENABLED=false` keeps the feature off by default, matching the user requirement that audio behaves "as today" unless explicitly enabled.
+
+Variables explicitly **deferred** to V2 (documented here, not implemented):
+
+```env
+PIPER_CHUNK_ADAPTIVE
+PIPER_CHUNK_PREFETCH
+PIPER_CHUNK_MAX_WORKERS
+PIPER_CHUNK_SAFETY_MARGIN_SECONDS
+PIPER_CHUNK_BENCHMARK_ON_START
+```
+
+The earlier `PIPER_CHUNK_THRESHOLD_CHARS` is **dropped**: with a single endpoint the splitter naturally emits one chunk for short text, so no threshold is needed.
+
+## Client Contract
+
+The bundled GUI is the reference client; any client should follow the same pattern.
+
+1. On load, `GET /health`. Read `chunks_enabled` (see below).
+2. If `chunks_enabled === true`: always call `POST /speak/chunks` and parse NDJSON. For short text the server returns one chunk, which is fine.
+3. If `chunks_enabled === false` (or `/speak/chunks` returns 501): fall back to `POST /speak`.
+4. While streaming: decode each chunk's `audio_base64` into a Blob, append to a playback queue, start playback on chunk 0 arrival, continue on `ended` for each queued chunk.
+5. On `error` event: finish the queue, then show the message.
+
+V1 accepts small audible gaps between WAV chunks in browser `<audio>` playback. V2 will move to Web Audio API for gapless scheduling.
+
+## `/health` Additions
 
 ```json
 {
-  "chunks_enabled": true,
-  "chunk_adaptive": true
+  "status": "ok",
+  "mode": "both",
+  "engine": true,
+  "gui": true,
+  "engine_url": "",
+  "chunks_enabled": false
 }
 ```
 
-## Risks
+Only `chunks_enabled` is new. No leaking of internal config (target/min/max) on `/health` — clients learn that from the `meta` event.
 
-- WAV chunks may produce small audible gaps in browser playback.
-- Too many small chunks can degrade prosody and add overhead.
-- Too-large chunks reduce the perceived latency benefit.
-- Parallel generation can overload small machines.
-- Browser autoplay policies may block playback unless initiated by user action.
-- Base64 audio in NDJSON increases payload size.
+## Service Mode Compatibility
 
-## Future Improvements
+All three modes (`both`, `engine`, `gui`) must keep working.
 
-- Web Audio API playback queue for smoother transitions.
-- Binary streaming or multipart audio chunks instead of base64.
-- Server-Sent Events or WebSocket transport.
-- Session-based chunk jobs with cancellation.
+- `engine` and `both`: expose `/speak/chunks` when enabled.
+- `gui`: forwards nothing; the browser calls the remote engine directly using `PIPER_ENGINE_URL`. CORS must allow the GUI origin.
+
+## Error Handling Summary
+
+| Condition | HTTP | Body |
+| --- | --- | --- |
+| Feature disabled | 501 | `text/plain` "Chunked TTS is disabled" |
+| Invalid JSON | 400 | text |
+| Empty text | 400 | text |
+| Unknown model | 400 | text |
+| Piper fails *before* any chunk emitted | 500 | text |
+| Piper fails *after* meta or chunk emitted | 200 (already sent) | in-band `{"type":"error"}` event |
+
+## Risks (V1)
+
+- Small audible gaps between WAV chunks in browser playback. Acceptable for V1; documented as a known limitation.
+- Base64 inflates payload by ~33%. Acceptable for V1 because each chunk is ≤ ~1 MB raw WAV at typical Piper settings. V2 will switch to a binary transport.
+- Reverse proxies that buffer responses (default nginx) can defeat progressive delivery. We set `X-Accel-Buffering: no`; deployment docs must mention disabling proxy buffering for this endpoint.
+- Browser autoplay policies may block playback unless triggered by user interaction. Reference GUI initiates from a click, which satisfies all major browsers.
+
+## Future Improvements (V2+)
+
+Captured for posterity, not in V1 scope:
+
+- Hardware profile (`hardware.py`: cpu_count, /proc/meminfo) feeding initial `target_chars`.
+- Startup or per-model benchmark (`benchmark.py`) measuring real-time factor (RTF) and adjusting target accordingly.
+- Adaptive chunk controller (`chunk_controller.py`) that observes per-chunk timing and adjusts future targets to satisfy `expected_generation_time + delivery < current_audio_duration − safety_margin`.
+- Multi-worker prefetch (`PIPER_CHUNK_MAX_WORKERS > 1`) generating chunk N+1 while chunk N streams.
+- Binary transport: NDJSON metadata + separate `GET /speak/chunks/{job}/{i}.wav` for the audio (removes base64 overhead, enables HTTP caching, but introduces job lifecycle state).
+- Web Audio API queue in the reference GUI for gapless playback.
+- Server-Sent Events / WebSocket variant for environments where chunked NDJSON over HTTP is buffered by proxies.
 - Per-model benchmark cache persisted to disk.
-- Smarter language-specific abbreviation detection.
-- Optional text normalization before splitting.
+- Language-specific abbreviation handling (e.g. "Sr." not ending a sentence) in the splitter.

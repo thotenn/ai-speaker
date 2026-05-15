@@ -30,4 +30,7 @@ def env_int(name: str, default: int) -> int:
     value = os.environ.get(name)
     if value is None:
         return default
-    return int(value)
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer (got {value!r})") from exc

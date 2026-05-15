@@ -12,6 +12,9 @@ from .engine import PiperEngine, PiperError
 from .models import DEFAULT_MODEL, MODELS
 
 
+MAX_REQUEST_BODY_BYTES = 1 * 1024 * 1024
+
+
 INDEX_HTML = """
 <!doctype html>
 <html lang="es">
@@ -56,7 +59,7 @@ INDEX_HTML = """
     const status = document.querySelector('#status');
     const audio = document.querySelector('#audio');
 
-    const engineUrl = '__ENGINE_URL__'.replace(/\\/$/, '');
+    const engineUrl = __ENGINE_URL_JSON__;
     const apiUrl = (path) => `${engineUrl}${path}`;
 
     async function loadModels() {
@@ -122,7 +125,8 @@ class PiperRequestHandler(BaseHTTPRequestHandler):
             if not self.gui_enabled:
                 self._send_error(HTTPStatus.NOT_FOUND, "GUI is disabled")
                 return
-            html = INDEX_HTML.replace("__ENGINE_URL__", self.engine_url)
+            engine_url_js = json.dumps(self.engine_url).replace("<", "\\u003c").replace(">", "\\u003e")
+            html = INDEX_HTML.replace("__ENGINE_URL_JSON__", engine_url_js)
             self._send_text(html, "text/html; charset=utf-8")
             return
 
@@ -164,6 +168,15 @@ class PiperRequestHandler(BaseHTTPRequestHandler):
 
         try:
             length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_error(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
+            return
+
+        if length > MAX_REQUEST_BODY_BYTES:
+            self._send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Payload too large")
+            return
+
+        try:
             payload = json.loads(self.rfile.read(length) or b"{}")
             text = str(payload.get("text", ""))
             model = str(payload.get("model", DEFAULT_MODEL))

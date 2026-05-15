@@ -1,186 +1,113 @@
-# Adaptive Chunked TTS Streaming Checklist
+# Adaptive Chunked TTS Streaming — V1 Checklist
 
-## Phase 0: Review And Baseline
+V1 scope only. Hardware detection, benchmark, adaptive controller, prefetch and binary transport are V2 and intentionally absent from this list.
 
-- [ ] Confirm current `/speak` behavior remains unchanged.
-- [ ] Confirm current GUI can still generate a full WAV through `/speak`.
-- [ ] Confirm `PIPER_SERVICE_MODE=both` works locally.
-- [ ] Confirm Docker can run the app in `both` mode.
-- [ ] Record a baseline for a short text generation time.
-- [ ] Record a baseline for a long text generation time.
-- [ ] Add baseline tests under `tests/test_engine_baseline.py`.
-- [ ] Test `/health` returns engine and GUI enabled in `both` mode.
-- [ ] Test `/models` returns configured models.
-- [ ] Test `/speak` returns `audio/wav` for short text.
-- [ ] Test `/speak` rejects empty text.
+## Phase 1 — Splitter (`piper_sandbox/chunks.py`)
 
-## Phase 1: Text Splitter
+- [ ] Add `ChunkConfig` dataclass (`target_chars`, `min_chars`, `max_chars`).
+- [ ] Add `TextChunk` dataclass (`index`, `text`, `chars`, `split_reason`).
+- [ ] Implement `split_text(text: str, config: ChunkConfig) -> list[TextChunk]`.
+- [ ] Normalize `\r\n` and `\r` to `\n` before splitting.
+- [ ] Raise `ValueError` on empty/whitespace-only text.
+- [ ] Outer pass: pack paragraphs separated by `\n{2,}` into the current chunk.
+- [ ] Emit current chunk when adding the next paragraph would overflow target significantly.
+- [ ] Never include the next paragraph just to consume residual target budget.
+- [ ] Inner pass: when a single paragraph exceeds `max_chars`, split inside it using `find_split` (sentence → strong → comma → space → hard).
+- [ ] `find_split` searches in window `[max(min_chars, 0.65 * target_chars), max_chars]`.
+- [ ] Boundary char stays in the *previous* chunk; leading whitespace stripped from the *next*.
+- [ ] First/only chunk uses `split_reason="single"`.
+- [ ] Sequential `index` starting at 0.
 
-- [ ] Add `piper_sandbox/chunks.py`.
-- [ ] Add `ChunkConfig` dataclass.
-- [ ] Add `TextChunk` dataclass.
-- [ ] Implement `split_text(text, config) -> list[TextChunk]`.
-- [ ] Track `split_reason` for each chunk.
-- [ ] Split paragraphs without blindly making every paragraph a chunk.
-- [ ] Combine multiple small paragraphs when they fit the target.
-- [ ] Leave the next paragraph for the next chunk when only a tiny target budget remains.
-- [ ] Prefer sentence boundaries near the target.
-- [ ] Fall back to strong separators.
-- [ ] Fall back to comma boundaries.
-- [ ] Fall back to whitespace.
-- [ ] Hard split only when no better boundary exists.
-- [ ] Preserve punctuation at the end of chunks.
-- [ ] Avoid empty chunks.
-- [ ] Preserve original reading order.
-- [ ] Add splitter tests under `tests/test_chunks_splitter.py`.
-- [ ] Test short text returns one chunk.
-- [ ] Test three short paragraphs totaling less than target become one chunk.
-- [ ] Test a fourth paragraph that would exceed target starts the next chunk.
-- [ ] Test long sentence over max chars is split by comma if possible.
-- [ ] Test text with no punctuation is split by whitespace.
-- [ ] Test text with no whitespace is hard split.
-- [ ] Test chunk lengths respect min/target/max where practical.
-- [ ] Test `split_reason` for representative cases.
+### Splitter tests (`tests/test_chunks.py`)
 
-## Phase 2: Hardware Profile
+- [ ] `pip install -e '.[dev]'` works and `pytest` discovers the file.
+- [ ] Short text returns exactly one chunk with `split_reason="single"`.
+- [ ] Three short paragraphs summing to ≤ target become one chunk.
+- [ ] A fourth paragraph that would clearly overflow target starts a new chunk.
+- [ ] Sentence longer than max splits at a comma.
+- [ ] Paragraph with no punctuation splits at whitespace.
+- [ ] Single token longer than max is hard-split at exactly `max_chars`.
+- [ ] Order is preserved: concatenated chunks equal the input modulo whitespace normalization.
+- [ ] No empty chunks ever returned.
+- [ ] `chars` matches `len(text)` in every chunk.
+- [ ] `\r\n` line endings produce the same chunks as `\n`.
+- [ ] Empty input raises `ValueError`.
 
-- [ ] Add `piper_sandbox/hardware.py`.
-- [ ] Implement `get_hardware_profile()`.
-- [ ] Detect CPU count with `os.cpu_count()`.
-- [ ] Detect memory on Linux from `/proc/meminfo`.
-- [ ] Return conservative fallback if memory cannot be detected.
-- [ ] Avoid requiring `psutil` in the first version.
-- [ ] Add hardware tests under `tests/test_hardware_profile.py`.
-- [ ] Test CPU count is an integer or conservative fallback.
-- [ ] Test `/proc/meminfo` parser handles valid input.
-- [ ] Test memory parser handles missing fields.
-- [ ] Test hardware profile creation does not raise on unsupported platforms.
+## Phase 2 — Endpoint (`piper_sandbox/api.py`)
 
-## Phase 3: Piper Benchmark
+- [ ] Read env at startup: `PIPER_CHUNKS_ENABLED` (default false), `PIPER_CHUNK_TARGET_CHARS=350`, `PIPER_CHUNK_MIN_CHARS=120`, `PIPER_CHUNK_MAX_CHARS=700`.
+- [ ] Validate `0 < min <= target <= max`; fail at startup otherwise.
+- [ ] Add `wav_duration_seconds(data: bytes)` helper using `wave.open(io.BytesIO(...))`.
+- [ ] Route `POST /speak/chunks` in `do_POST`.
+- [ ] Return 501 with `text/plain` when feature flag is off.
+- [ ] Return 404 when service mode is `gui` (engine disabled).
+- [ ] Validate JSON, non-empty `text`, known `model` before any streaming → 400 on failure.
+- [ ] Call `split_text` before opening the stream so chunk count is known for `meta`.
+- [ ] Send response headers: `200`, `Content-Type: application/x-ndjson; charset=utf-8`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`, CORS, **no** `Content-Length`.
+- [ ] Emit `meta` event first with `model`, `chunks`, `target_chars`, `min_chars`, `max_chars`.
+- [ ] For each chunk: synthesize, measure `synthesis_seconds` and `duration_seconds`, base64-encode WAV, emit `chunk` event with `index`, `chars`, `split_reason`, `synthesis_seconds`, `duration_seconds`, `rtf`, `audio_base64`.
+- [ ] Omit chunk `text` by default; include only when `?include_text=1`.
+- [ ] Flush after every event.
+- [ ] On `PiperError` mid-stream: emit `{"type":"error","index":i,"message":...}` and return.
+- [ ] Emit `done` event last on success.
+- [ ] `/speak` handler untouched (still byte-compatible).
 
-- [ ] Add `piper_sandbox/benchmark.py`.
-- [ ] Generate a short benchmark phrase with selected/default model.
-- [ ] Measure synthesis wall time.
-- [ ] Measure WAV duration.
-- [ ] Compute real-time factor.
-- [ ] Cache benchmark result by model name in memory.
-- [ ] Make benchmark disableable by env.
-- [ ] Ensure benchmark failure does not stop service startup.
-- [ ] Use conservative defaults when benchmark is unavailable.
-- [ ] Add benchmark tests under `tests/test_benchmark.py`.
-- [ ] Test RTF calculation.
-- [ ] Test failed synthesis returns fallback result.
-- [ ] Test cached benchmark prevents duplicate synthesis.
-- [ ] Test chunk target selection changes based on RTF thresholds.
+### Health update
 
-## Phase 4: Adaptive Chunk Controller
+- [ ] Add `chunks_enabled` boolean to `/health` JSON response.
 
-- [ ] Add `piper_sandbox/chunk_controller.py`.
-- [ ] Load chunk config from env defaults.
-- [ ] Combine env defaults, hardware profile, benchmark result, and model name.
-- [ ] Produce `ChunkConfig`.
-- [ ] Reduce target chars for slow benchmark.
-- [ ] Increase target chars for fast benchmark within bounds.
-- [ ] Keep worker count at 1 for low CPU count.
-- [ ] Respect configured max workers.
-- [ ] Apply safety margin in readiness estimates.
-- [ ] Keep controller deterministic for the same inputs.
-- [ ] Add controller tests under `tests/test_chunk_controller.py`.
-- [ ] Test fast RTF creates larger target than slow RTF.
-- [ ] Test target never exceeds configured max.
-- [ ] Test target never goes below configured min.
-- [ ] Test worker count respects configured maximum.
-- [ ] Test missing benchmark returns default config.
+### Endpoint tests (`tests/test_speak_chunks_endpoint.py`)
 
-## Phase 5: Chunked Engine Endpoint
+- [ ] Fixture: monkeypatch `PiperRequestHandler.engine` to a `FakeEngine` returning a canned ~1-second silent WAV.
+- [ ] Fixture: start `ThreadingHTTPServer` on an ephemeral port; teardown shuts it down.
+- [ ] When disabled: `POST /speak/chunks` → 501.
+- [ ] When enabled, valid short text → 200, `application/x-ndjson`, sequence: `meta` (chunks=1), one `chunk`, `done`.
+- [ ] When enabled, long text → multiple `chunk` events with sequential indexes.
+- [ ] `chunk.audio_base64` decodes to bytes starting with `RIFF`.
+- [ ] Empty text → 400 before any NDJSON.
+- [ ] Unknown model → 400 before any NDJSON.
+- [ ] Invalid JSON → 400.
+- [ ] `?include_text=1` adds `text` field; default request omits it.
+- [ ] `/health` exposes `chunks_enabled` matching the env value.
 
-- [ ] Add `POST /speak/chunks`.
-- [ ] Use `application/x-ndjson` response type.
-- [ ] Parse JSON input.
-- [ ] Validate text before streaming starts.
-- [ ] Validate model before streaming starts.
-- [ ] Split text into chunks.
-- [ ] Emit `meta` event first.
-- [ ] Generate audio for each chunk.
-- [ ] Emit `chunk` events with base64 WAV.
-- [ ] Include index, text, chars, duration, synthesis time, RTF, and split reason in chunk events.
-- [ ] Emit `done` event after all chunks.
-- [ ] Emit `error` event if Piper fails after streaming begins.
-- [ ] Flush each NDJSON event as it is written.
-- [ ] Keep existing `/speak` endpoint unchanged.
-- [ ] Add endpoint tests under `tests/test_speak_chunks_endpoint.py`.
-- [ ] Test endpoint returns NDJSON content type.
-- [ ] Test short text produces one chunk.
-- [ ] Test long text produces multiple chunks.
-- [ ] Test meta event appears first.
-- [ ] Test done event appears last.
-- [ ] Test chunk indexes are sequential.
-- [ ] Test audio payload decodes from base64.
-- [ ] Test existing `/speak` tests still pass.
+## Phase 3 — Reference GUI
 
-## Phase 6: Reference GUI Chunk Playback
+- [ ] `INDEX_HTML` fetches `/health` on load and reads `chunks_enabled`.
+- [ ] When chunks enabled: `say()` calls `/speak/chunks`, parses NDJSON from `response.body.getReader()`.
+- [ ] When chunks disabled: `say()` calls `/speak` (current behavior).
+- [ ] Decode `audio_base64` → `Uint8Array` → `Blob({type:'audio/wav'})`.
+- [ ] Maintain FIFO playback queue; start playback on first chunk; on `audio.ended` play next.
+- [ ] Status text reflects state: `Generando`, `Reproduciendo (i/N)`, `Listo`, `Error`.
+- [ ] Handle in-band `error` event: finish queued chunks, then alert.
+- [ ] Health fetch uses the same `__ENGINE_URL__` as `/speak/chunks` (works in `gui` mode pointing to remote engine).
+- [ ] Manually click "Hablar" with a long paragraph and confirm playback starts before all chunks have arrived.
 
-- [ ] Keep current full-WAV path for short text.
-- [ ] Switch to `/speak/chunks` when text exceeds threshold.
-- [ ] Parse NDJSON progressively in browser.
-- [ ] Decode base64 audio into blobs.
-- [ ] Queue chunk audio blobs.
-- [ ] Start playback as soon as chunk 0 arrives.
-- [ ] Play queued chunks sequentially.
-- [ ] Display generating/buffering/playing/done status.
-- [ ] Handle stream error events.
-- [ ] Work against same-origin engine in `both` mode.
-- [ ] Work against remote engine via `PIPER_ENGINE_URL`.
-- [ ] Add static GUI tests under `tests/test_gui_static_html.py`.
-- [ ] Test HTML contains chunk endpoint code.
-- [ ] Test HTML injects configured engine URL.
-- [ ] Test threshold config is present or fetchable.
+## Phase 4 — Config and docs
 
-## Phase 7: Prefetch And Timing Adaptation
+- [ ] Add new variables to `.env.example`: `PIPER_CHUNKS_ENABLED`, `PIPER_CHUNK_TARGET_CHARS`, `PIPER_CHUNK_MIN_CHARS`, `PIPER_CHUNK_MAX_CHARS`. Default `PIPER_CHUNKS_ENABLED=false`.
+- [ ] Add the same env vars (with the same defaults) to `Dockerfile` `ENV` block.
+- [ ] Add `pytest>=8` to `pyproject.toml` `[project.optional-dependencies].dev`.
+- [ ] README: add `/speak/chunks` section under `## Endpoints`, document NDJSON event shape, document `PIPER_CHUNKS_ENABLED` and chunk env vars.
+- [ ] README: document the known proxy-buffering caveat.
+- [ ] CLAUDE.md: add one line under `## Architecture` noting the new endpoint and module, and add `chunks.py` to the module list.
 
-- [ ] Track synthesis time per chunk.
-- [ ] Track audio duration per chunk.
-- [ ] Compute RTF per chunk.
-- [ ] Estimate whether next chunk can be ready before current playback ends.
-- [ ] Reduce future target size when generation cannot keep up.
-- [ ] Increase future target size when generation is comfortably faster than playback.
-- [ ] Keep target inside min/max bounds.
-- [ ] Avoid oscillation with smoothing or conservative adjustment.
-- [ ] Keep first implementation single-worker unless explicitly configured.
-- [ ] Add adaptive timing tests under `tests/test_adaptive_timing.py`.
-- [ ] Test slow observed generation reduces next target.
-- [ ] Test fast observed generation increases next target.
-- [ ] Test adjustment never violates min/max.
-- [ ] Test safety margin is applied.
-- [ ] Test controller does not overreact to one outlier.
+## Phase 5 — Validation
 
-## Phase 8: Docker And Deployment Validation
-
-- [ ] Validate `both` mode in Docker.
-- [ ] Validate `engine` mode exposes `/speak/chunks`.
-- [ ] Validate `gui` mode calls remote `/speak/chunks` through `PIPER_ENGINE_URL`.
-- [ ] Validate CORS for remote GUI to engine calls.
-- [ ] Validate health endpoint exposes chunking status.
-- [ ] Validate Docker volume stores downloaded models.
-- [ ] Document manual Docker smoke commands.
-
-## Phase 9: Documentation
-
-- [ ] Add `/speak/chunks` to README endpoints.
-- [ ] Document chunk env variables.
-- [ ] Document `both` mode for development.
-- [ ] Document engine-only deployment.
-- [ ] Document GUI-only deployment.
-- [ ] Document known limitations around WAV chunk gaps.
-- [ ] Document recommended future Web Audio API path.
+- [ ] `python -m compileall piper_sandbox` passes.
+- [ ] `pytest` passes.
+- [ ] Manual: `/speak` returns identical bytes for a fixed input compared to the previous commit (record hash before changes).
+- [ ] Manual: `/speak/chunks` with feature off → 501.
+- [ ] Manual: `/speak/chunks` with feature on, short text → 1 chunk.
+- [ ] Manual: `/speak/chunks` with feature on, long paragraph → ≥3 chunks, first chunk arrives noticeably before the last.
+- [ ] Mode `engine`: `/speak/chunks` works, `/` returns 404.
+- [ ] Mode `gui` against a remote engine: browser GUI loads, calls remote `/health` and `/speak/chunks`, plays audio. CORS allows it.
+- [ ] Docker compose `up --build` reaches healthy `/health` with `chunks_enabled=true` when the env override is set.
 
 ## Acceptance Criteria
 
-- [ ] `/speak` remains backwards compatible.
-- [ ] `/speak/chunks` streams valid NDJSON events.
-- [ ] Long text is split into natural chunks.
-- [ ] First audio chunk arrives before full text synthesis completes.
-- [ ] Chunk metadata exposes timing information.
-- [ ] Reference GUI can play chunked audio in order.
-- [ ] The system can run in `both`, `engine`, and `gui` modes.
-- [ ] The feature has unit tests for splitter, hardware profile, benchmark math, controller, and endpoint contracts.
+- [ ] `/speak` remains byte-compatible.
+- [ ] `/speak/chunks` streams valid NDJSON when enabled, returns 501 when disabled.
+- [ ] Long text plays earlier than today in the reference GUI.
+- [ ] Splitter covered by unit tests; endpoint covered by integration tests against a fake engine.
+- [ ] All three service modes still work.
+- [ ] No regression in startup time when the flag is off (no new imports on the hot path beyond `chunks.py` config parsing).
